@@ -1,0 +1,19 @@
+{
+  "name": "Browser Automation Extension",
+  "version": "1.1.0",
+  "manifest_version": 3,
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Browser Automation Extension"
+  }
+}
