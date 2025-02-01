@@ -1,21 +1,14 @@
-// index.js
-
 const express = require("express");
 const bodyParser = require("body-parser");
 // const cors = require("cors");
 const TaskQueue = require("./managers/TaskQueue");
 const TabManager = require("./managers/TabManager");
 const winston = require("winston");
+const http = require("http");
+const socketIo = require("socket.io");
 
 const app = express();
 app.use(bodyParser.json());
-
-// Setup CORS to allow requests from the extension
-// app.use(cors({
-//   origin: "chrome-extension://<your-extension-id>", // Replace with your actual extension ID
-//   methods: ["GET", "POST"],
-//   allowedHeaders: ["Content-Type"],
-// }));
 
 // Setup Winston logger
 const logger = winston.createLogger({
@@ -48,22 +41,27 @@ const pendingTasks = new Map();
  * @param {number} timeoutMs - Timeout in milliseconds.
  * @returns {Promise} - Resolves with task data or rejects on timeout/error.
  */
-function waitForTaskCompletion(taskId, timeoutMs = 30000) { // 30 seconds timeout
+function waitForTaskCompletion(taskId, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
-    // Store the resolve and reject functions in the pendingTasks map
     pendingTasks.set(taskId, { resolve, reject });
-
-    // Set up a timeout to reject the promise if not resolved in time
     const timeout = setTimeout(() => {
       if (pendingTasks.has(taskId)) {
         pendingTasks.get(taskId).reject(new Error("Task timed out."));
         pendingTasks.delete(taskId);
       }
     }, timeoutMs);
-
-    // Attach the timeout to the resolver for cleanup
     pendingTasks.get(taskId).timeout = timeout;
   });
+}
+
+/**
+ * Broadcast a task to all connected socket.io clients.
+ * @param {Object} task - The task object to broadcast.
+ */
+function broadcastTask(task) {
+  if (io) {
+    io.emit("newTask", task);
+  }
 }
 
 // ------------------------------------
@@ -71,16 +69,11 @@ function waitForTaskCompletion(taskId, timeoutMs = 30000) { // 30 seconds timeou
 app.post("/add-task", async (req, res) => {
   try {
     const { taskId, command, url, jsFunction, tabId } = req.body;
-
-    // Validate command
     const validCommands = ["open-tab", "close-tab", "find-tab", "execute-js"];
     if (!validCommands.includes(command)) {
       return res.status(400).json({ success: false, error: `Invalid command: ${command}` });
     }
-
-    // Generate a unique taskId if not provided
     const newTaskId = taskId || `task-${Date.now()}`;
-
     const task = {
       taskId: newTaskId,
       command,
@@ -88,11 +81,9 @@ app.post("/add-task", async (req, res) => {
       url: url || null,
       jsFunction: jsFunction || null,
     };
-
     taskQueue.addTask(task);
     logger.info(`Added task: ${JSON.stringify(task)}`);
-
-    // Wait for the task to be completed
+    broadcastTask(task);
     try {
       const result = await waitForTaskCompletion(newTaskId);
       res.json({ success: true, task, result });
@@ -107,7 +98,7 @@ app.post("/add-task", async (req, res) => {
 });
 
 // ------------------------------------
-// 2. Get the Next Available Task
+// 2. Get the Next Available Task (Fallback Endpoint)
 app.get("/get-task", (req, res) => {
   try {
     const nextTask = taskQueue.getNextTask();
@@ -131,26 +122,20 @@ app.post("/report-result", (req, res) => {
     const { taskId, data } = req.body;
     logger.info(`Task ${taskId} completed successfully: ${JSON.stringify(data)}`);
 
-    // If this was an open-tab or tab update command, data includes { tabId, windowId, url }
     if (data && data.tabId && data.windowId && data.url) {
       tabManager.addOrUpdateTab(data.tabId, data.windowId, data.url);
       logger.info(`Added/Updated tab ${data.tabId} in window ${data.windowId} with URL ${data.url}`);
     }
-
-    // If this was a close-tab command, data includes { closedTabId }
     if (data && data.closedTabId) {
       tabManager.removeClosedTab(data.closedTabId);
       logger.info(`Removed tab ${data.closedTabId}`);
     }
-
-    // Resolve the pending task if it exists
     if (pendingTasks.has(taskId)) {
       const { resolve, timeout } = pendingTasks.get(taskId);
-      clearTimeout(timeout); // Clear the timeout
+      clearTimeout(timeout);
       resolve(data);
       pendingTasks.delete(taskId);
     }
-
     res.json({ success: true });
   } catch (error) {
     logger.error(`Error in /report-result: ${error.message}`);
@@ -176,15 +161,12 @@ app.post("/report-result/error", (req, res) => {
   try {
     const { taskId, error: errorMsg } = req.body;
     logger.error(`Task ${taskId} failed with error: ${errorMsg}`);
-
-    // Reject the pending task if it exists
     if (pendingTasks.has(taskId)) {
       const { reject, timeout } = pendingTasks.get(taskId);
-      clearTimeout(timeout); // Clear the timeout
+      clearTimeout(timeout);
       reject(new Error(errorMsg));
       pendingTasks.delete(taskId);
     }
-
     res.json({ success: true });
   } catch (error) {
     logger.error(`Error in /report-result/error: ${error.message}`);
@@ -193,20 +175,15 @@ app.post("/report-result/error", (req, res) => {
 });
 
 // ------------------------------------
-// 6. Sync Opened Tabs (New Endpoint)
+// 6. Sync Opened Tabs
 app.post("/sync-tabs", async (req, res) => {
   try {
-    const { tabs } = req.body; // Expecting an array of { tabId, windowId, url }
-
+    const { tabs } = req.body;
     if (!Array.isArray(tabs)) {
       return res.status(400).json({ success: false, error: "Invalid tabs format. Expected an array." });
     }
-
-    // Replace the entire list of opened tabs and windows
     tabManager.replaceAllTabs(tabs);
-
     logger.info(`Synchronized ${tabs.length} tabs from the extension.`);
-
     res.json({ success: true, syncedTabs: tabs });
   } catch (error) {
     logger.error(`Error in /sync-tabs: ${error.message}`);
@@ -215,33 +192,26 @@ app.post("/sync-tabs", async (req, res) => {
 });
 
 // ------------------------------------
-// 7. New Endpoint: Switch Tab by tabId
+// 7. Switch Tab Endpoint
 app.post("/switch-tab", async (req, res) => {
   try {
     const { tabId } = req.body;
-
     if (typeof tabId !== 'number') {
       return res.status(400).json({ success: false, error: "Invalid or missing 'tabId'. It should be a number." });
     }
-
-    // Check for existing switch-tab tasks for the same tabId to prevent duplicates
     const existingTask = taskQueue.queue.find(task => task.command === "switch-tab" && task.tabId === tabId);
     if (existingTask) {
       return res.status(409).json({ success: false, error: `A switch-tab task for tabId ${tabId} is already pending.` });
     }
-
-    // Create a new task to switch the tab
     const newTaskId = `switch-tab-${tabId}-${Date.now()}`;
     const task = {
       taskId: newTaskId,
       command: "switch-tab",
       tabId,
     };
-
     taskQueue.addTask(task);
     logger.info(`Added switch-tab task: ${JSON.stringify(task)}`);
-
-    // Wait for the task to be completed
+    broadcastTask(task);
     try {
       const result = await waitForTaskCompletion(newTaskId);
       res.json({ success: true, task, result });
@@ -249,7 +219,6 @@ app.post("/switch-tab", async (req, res) => {
       logger.error(`Task ${newTaskId} failed: ${error.message}`);
       res.status(500).json({ success: false, error: error.message });
     }
-
   } catch (error) {
     logger.error(`Error in /switch-tab: ${error.message}`);
     res.status(400).json({ success: false, error: error.message });
@@ -257,20 +226,16 @@ app.post("/switch-tab", async (req, res) => {
 });
 
 // ------------------------------------
-// 8. New Endpoint: Execute JS Function by tabId
+// 8. Execute JS Endpoint
 app.post("/execute-js", async (req, res) => {
   try {
     const { tabId, jsFunction } = req.body;
-
     if (typeof tabId !== 'number') {
       return res.status(400).json({ success: false, error: "Invalid or missing 'tabId'. It should be a number." });
     }
-
     if (typeof jsFunction !== 'string') {
       return res.status(400).json({ success: false, error: "Invalid or missing 'jsFunction'. It should be a string." });
     }
-
-    // Create a new task to execute the JS function
     const newTaskId = `execute-js-${tabId}-${Date.now()}`;
     const task = {
       taskId: newTaskId,
@@ -278,11 +243,9 @@ app.post("/execute-js", async (req, res) => {
       tabId,
       jsFunction,
     };
-
     taskQueue.addTask(task);
     logger.info(`Added execute-js task: ${JSON.stringify(task)}`);
-
-    // Wait for the task to be completed
+    broadcastTask(task);
     try {
       const result = await waitForTaskCompletion(newTaskId);
       res.json({ success: true, task, result });
@@ -290,7 +253,6 @@ app.post("/execute-js", async (req, res) => {
       logger.error(`Task ${newTaskId} failed: ${error.message}`);
       res.status(500).json({ success: false, error: error.message });
     }
-
   } catch (error) {
     logger.error(`Error in /execute-js: ${error.message}`);
     res.status(400).json({ success: false, error: error.message });
@@ -298,7 +260,28 @@ app.post("/execute-js", async (req, res) => {
 });
 
 // ------------------------------------
+// Start HTTP Server and attach Socket.IO.
 const PORT = 3000;
-app.listen(PORT, () => {
+const server = http.createServer(app);
+server.listen(PORT, () => {
   logger.info(`Node.js API listening on port ${PORT}`);
+});
+
+// Create Socket.IO server on the HTTP server.
+const io = socketIo(server, {
+  cors: {
+    origin: "*", // Adjust this if needed for security.
+    methods: ["GET", "POST"]
+  }
+});
+
+io.on("connection", (socket) => {
+  logger.info("New Socket.IO connection established.");
+  // On new connection, send pending tasks if any exist.
+  if (taskQueue.queue && taskQueue.queue.length > 0) {
+    socket.emit("pendingTasks", taskQueue.queue);
+  }
+  socket.on("disconnect", () => {
+    logger.info("Socket.IO connection closed.");
+  });
 });
