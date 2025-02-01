@@ -136,7 +136,14 @@ function closeTab(tabId) {
   });
 }
 
-// Execute a JavaScript function string in a specified tab
+/**
+ * Execute a JavaScript function string in a specified tab.
+ *
+ * This function uses chrome.scripting.executeScript to inject a script into the target tab.
+ * The injected code creates a script element from a Blob URL so that it runs in the page’s context.
+ * The injected script executes the provided code (e.g. "return document.title;")
+ * and then uses window.postMessage to send the result back.
+ */
 async function executeJSInTab(tabId, jsFunction) {
   if (!tabId) {
     throw new Error("No tabId provided to execute-js command");
@@ -145,15 +152,61 @@ async function executeJSInTab(tabId, jsFunction) {
     throw new Error("No jsFunction provided for execution");
   }
   try {
-    const injectionResults = await chrome.scripting.executeScript({
+    const [{ result, error }] = await chrome.scripting.executeScript({
       target: { tabId },
-      func: new Function(jsFunction), // Convert string to function
+      // This option makes sure the code is injected into the page’s main world.
+      world: "MAIN",
+      func: (code) => {
+        return new Promise((resolve, reject) => {
+          // Generate a unique result identifier.
+          const resultId = "result_" + Date.now();
+          let blobURL, script;
+
+          function messageListener(event) {
+            if (event.data && event.data.resultId === resultId) {
+              window.removeEventListener("message", messageListener);
+              if (script && script.parentNode) {
+                script.parentNode.removeChild(script);
+              }
+              if (blobURL) {
+                URL.revokeObjectURL(blobURL);
+              }
+              if (event.data.error) {
+                reject(event.data.error);
+              } else {
+                resolve(event.data.result);
+              }
+            }
+          }
+          window.addEventListener("message", messageListener);
+
+          // Build the script content that will be injected.
+          const scriptContent = `
+            (function() {
+              try {
+                const result = (function() { ${code} })();
+                window.postMessage({ resultId: '${resultId}', result: result }, "*");
+              } catch(e) {
+                window.postMessage({ resultId: '${resultId}', error: e.toString() }, "*");
+              }
+            })();
+          `;
+          const blob = new Blob([scriptContent], { type: 'text/javascript' });
+          blobURL = URL.createObjectURL(blob);
+          script = document.createElement("script");
+          script.src = blobURL;
+          document.body.appendChild(script);
+        });
+      },
+      args: [jsFunction],
     });
-    return { result: injectionResults[0]?.result };
+    if (error) throw new Error(error);
+    return { result: result };
   } catch (error) {
     throw new Error(`Failed to execute JS in tab ${tabId}: ${error.message}`);
   }
 }
+
 
 // New Function: Switch Tab by tabId
 async function switchTab(tabId) {
