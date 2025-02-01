@@ -15,5 +15,18 @@
   },
   "action": {
     "default_title": "Browser Automation Extension"
-  }
+  },
+  "sandbox": {
+    "pages": ["sandbox.html"]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-eval';"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["runner.html", "sandbox.html", "runner.js", "sandbox.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }
