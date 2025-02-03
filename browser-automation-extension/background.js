@@ -136,12 +136,19 @@ function openTab(url) {
       if (chrome.runtime.lastError) {
         return reject(chrome.runtime.lastError.message);
       }
-      chrome.windows.get(tab.windowId, {}, (window) => {
-        if (chrome.runtime.lastError) {
-          return reject(chrome.runtime.lastError.message);
+      // Listener to check when the tab has fully loaded
+      const checkTabLoaded = (updatedTabId, changeInfo, updatedTab) => {
+        if (updatedTabId === tab.id && changeInfo.status === "complete") {
+          chrome.tabs.onUpdated.removeListener(checkTabLoaded);
+          chrome.windows.get(tab.windowId, {}, (window) => {
+            if (chrome.runtime.lastError) {
+              return reject(chrome.runtime.lastError.message);
+            }
+            resolve({ tabId: tab.id, windowId: tab.windowId, url: updatedTab.url });
+          });
         }
-        resolve({ tabId: tab.id, windowId: tab.windowId, url: tab.url });
-      });
+      };
+      chrome.tabs.onUpdated.addListener(checkTabLoaded);
     });
   });
 }
