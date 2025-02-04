@@ -65,22 +65,24 @@ function broadcastTask(task) {
 }
 
 // ------------------------------------
-// 1. Add a Task (No tabId needed for open-tab)
+// 1. Perform Task Endpoint (all actions via /add-task)
+// Allowed commands: open-tab, close-tab, find-tab, execute-js, switch-tab, sync-tabs
 app.post("/add-task", async (req, res) => {
   try {
-    const { taskId, command, url, jsFunction, tabId } = req.body;
-    const validCommands = ["open-tab", "close-tab", "find-tab", "execute-js"];
+    const { taskId, command, tabId, jsFunction, url } = req.body;
+    const validCommands = ["open-tab", "close-tab", "execute-js", "switch-tab"];
+    
     if (!validCommands.includes(command)) {
       return res.status(400).json({ success: false, error: `Invalid command: ${command}` });
     }
+    
+    if (command !== "open-tab" && !tabId) {
+      return res.status(400).json({ success: false, error: "tabId is required for this command" });
+    }
+    
     const newTaskId = taskId || `task-${Date.now()}`;
-    const task = {
-      taskId: newTaskId,
-      command,
-      tabId: tabId || null,
-      url: url || null,
-      jsFunction: jsFunction || null,
-    };
+    const task = { taskId: newTaskId, command, tabId, jsFunction, url: command === "open-tab" ? url : null };
+
     taskQueue.addTask(task);
     logger.info(`Added task: ${JSON.stringify(task)}`);
     broadcastTask(task);
@@ -97,20 +99,16 @@ app.post("/add-task", async (req, res) => {
   }
 });
 
+
+
 // ------------------------------------
-// 2. Get the Next Available Task (Fallback Endpoint)
-app.get("/get-task", (req, res) => {
+// 2. Get All Opened Tabs (Getter Endpoint)
+app.get("/opened-tabs", (req, res) => {
   try {
-    const nextTask = taskQueue.getNextTask();
-    if (nextTask) {
-      logger.info(`Providing next task: ${JSON.stringify(nextTask)}`);
-      res.json(nextTask);
-    } else {
-      logger.info("No tasks available to provide.");
-      res.json({});
-    }
+    const allTabs = tabManager.getAllOpenedTabs();
+    res.json({ success: true, tabs: allTabs });
   } catch (error) {
-    logger.error(`Error in /get-task: ${error.message}`);
+    logger.error(`Error in /opened-tabs: ${error.message}`);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -144,19 +142,7 @@ app.post("/report-result", (req, res) => {
 });
 
 // ------------------------------------
-// 4. Get All Opened Tabs (Public Endpoint)
-app.get("/opened-tabs", (req, res) => {
-  try {
-    const allTabs = tabManager.getAllOpenedTabs();
-    res.json({ success: true, tabs: allTabs });
-  } catch (error) {
-    logger.error(`Error in /opened-tabs: ${error.message}`);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ------------------------------------
-// 5. Report an Error
+// 4. Report an Error
 app.post("/report-result/error", (req, res) => {
   try {
     const { taskId, error: errorMsg } = req.body;
@@ -175,7 +161,7 @@ app.post("/report-result/error", (req, res) => {
 });
 
 // ------------------------------------
-// 6. Sync Opened Tabs
+// 5. Sync Opened Tabs 
 app.post("/sync-tabs", async (req, res) => {
   try {
     const { tabs } = req.body;
@@ -188,74 +174,6 @@ app.post("/sync-tabs", async (req, res) => {
   } catch (error) {
     logger.error(`Error in /sync-tabs: ${error.message}`);
     res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ------------------------------------
-// 7. Switch Tab Endpoint
-app.post("/switch-tab", async (req, res) => {
-  try {
-    const { tabId } = req.body;
-    if (typeof tabId !== 'number') {
-      return res.status(400).json({ success: false, error: "Invalid or missing 'tabId'. It should be a number." });
-    }
-    const existingTask = taskQueue.queue.find(task => task.command === "switch-tab" && task.tabId === tabId);
-    if (existingTask) {
-      return res.status(409).json({ success: false, error: `A switch-tab task for tabId ${tabId} is already pending.` });
-    }
-    const newTaskId = `switch-tab-${tabId}-${Date.now()}`;
-    const task = {
-      taskId: newTaskId,
-      command: "switch-tab",
-      tabId,
-    };
-    taskQueue.addTask(task);
-    logger.info(`Added switch-tab task: ${JSON.stringify(task)}`);
-    broadcastTask(task);
-    try {
-      const result = await waitForTaskCompletion(newTaskId);
-      res.json({ success: true, task, result });
-    } catch (error) {
-      logger.error(`Task ${newTaskId} failed: ${error.message}`);
-      res.status(500).json({ success: false, error: error.message });
-    }
-  } catch (error) {
-    logger.error(`Error in /switch-tab: ${error.message}`);
-    res.status(400).json({ success: false, error: error.message });
-  }
-});
-
-// ------------------------------------
-// 8. Execute JS Endpoint
-app.post("/execute-js", async (req, res) => {
-  try {
-    const { tabId, jsFunction } = req.body;
-    if (typeof tabId !== 'number') {
-      return res.status(400).json({ success: false, error: "Invalid or missing 'tabId'. It should be a number." });
-    }
-    if (typeof jsFunction !== 'string') {
-      return res.status(400).json({ success: false, error: "Invalid or missing 'jsFunction'. It should be a string." });
-    }
-    const newTaskId = `execute-js-${tabId}-${Date.now()}`;
-    const task = {
-      taskId: newTaskId,
-      command: "execute-js",
-      tabId,
-      jsFunction,
-    };
-    taskQueue.addTask(task);
-    logger.info(`Added execute-js task: ${JSON.stringify(task)}`);
-    broadcastTask(task);
-    try {
-      const result = await waitForTaskCompletion(newTaskId);
-      res.json({ success: true, task, result });
-    } catch (error) {
-      logger.error(`Task ${newTaskId} failed: ${error.message}`);
-      res.status(500).json({ success: false, error: error.message });
-    }
-  } catch (error) {
-    logger.error(`Error in /execute-js: ${error.message}`);
-    res.status(400).json({ success: false, error: error.message });
   }
 });
 

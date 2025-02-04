@@ -70,7 +70,6 @@ function connectSocket() {
   });
 }
 
-
 // Start the socket connection on installation/startup.
 chrome.runtime.onInstalled.addListener(() => {
   console.log("Extension installed. Syncing opened tabs and connecting Socket.IO...");
@@ -111,12 +110,15 @@ async function executeTask(task) {
         result = await openTab(url);
         break;
       case "close-tab":
-        result = await closeTab(tabId);
+        if (!tabId) throw new Error("Missing tabId for close-tab");
+        result = await closeTab(tabId, taskId);
         break;
       case "execute-js":
+        if (!tabId || !jsFunction) throw new Error("Missing tabId or jsFunction for execute-js");
         result = await executeJSInTab(tabId, jsFunction);
         break;
       case "switch-tab":
+        if (!tabId) throw new Error("Missing tabId for switch-tab");
         result = await switchTab(tabId);
         break;
       default:
@@ -129,6 +131,7 @@ async function executeTask(task) {
     await reportError(taskId, error.message);
   }
 }
+
 
 function openTab(url) {
   return new Promise((resolve, reject) => {
@@ -153,7 +156,7 @@ function openTab(url) {
   });
 }
 
-function closeTab(tabId) {
+function closeTab(tabId, taskId) {
   return new Promise((resolve, reject) => {
     if (!tabId) {
       return reject("No tabId provided to close-tab command");
@@ -162,10 +165,18 @@ function closeTab(tabId) {
       if (chrome.runtime.lastError) {
         return reject(chrome.runtime.lastError.message);
       }
+      
+      console.log(`Tab closed: ID=${tabId}`);
+
+      // Report result using the original taskId (fixes timeout issue)
+      reportResult(taskId, { closedTabId: tabId });
+
       resolve({ closedTabId: tabId });
     });
   });
 }
+
+
 
 async function executeJSInTab(tabId, jsFunction) {
   if (!tabId) {
